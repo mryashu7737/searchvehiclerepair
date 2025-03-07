@@ -5,7 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Vehicle servicing center
     </title>
-    <script src="//maps.googleapis.com/maps/api/js?key=AIzaSyCqt3lwenssUKGJz-h2e9mbKO81N9a8sbM&libraries=places,geometry,drawing"></script>
+    <script>
+        // Load the Google Maps API dynamically
+        fetch('/get-api-key')
+            .then(response => response.json())
+            .then(data => {
+                if (data.apiKey) {
+                    const script = document.createElement('script');
+                    script.src = `//maps.googleapis.com/maps/api/js?key=${data.apiKey}&libraries=places,geometry,drawing`;
+                    script.async = true;
+                    script.defer = true;
+                    script.onload = initMap;
+                    document.head.appendChild(script);
+                } else {
+                    console.error('API key not found');
+                    document.body.innerHTML = '<h1>Error: Could not load Google Maps API</h1>';
+                }
+            })
+            .catch(error => {
+                console.error('Error loading API key:', error);
+                document.body.innerHTML = '<h1>Error: Could not load Google Maps API</h1>';
+            });
+    </script>
     <style>
         #map {
             height: 500px;
@@ -64,7 +85,83 @@
         color: #ffffff; /* White text for better contrast */
         font-family: Arial, sans-serif;
     }
-
+        /* Add loading spinner styles */
+        .spinner {
+            display: none;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4CAF50;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .search-button {
+            position: relative;
+            min-width: 80px;
+        }
+        .search-button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        /* Add styles for the distance info */
+        .distance-info {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #3a3a3a;
+            border-radius: 5px;
+            font-size: 1.1em;
+        }
+        /* Add styles for directions panel */
+        #directions-panel {
+            color: #ffffff;
+            background-color: #3a3a3a;
+            padding: 15px;
+            margin-top: 20px;
+            border-radius: 5px;
+            line-height: 1.5;
+        }
+        #directions-panel div {
+            color: #ffffff !important;
+        }
+        #directions-panel .adp-directions {
+            color: #ffffff;
+        }
+        #directions-panel .adp-placemark {
+            background-color: #4a4a4a;
+            border: none;
+            margin: 10px 0;
+        }
+        #directions-panel .adp-summary {
+            color: #ffffff;
+            padding: 10px 0;
+        }
+        #directions-panel .adp-legal {
+            color: #aaaaaa;
+        }
+        #directions-panel table {
+            color: #ffffff;
+        }
+        #directions-panel .adp-text {
+            color: #ffffff;
+        }
+        /* Override any Google Maps default styles */
+        .adp, .adp table {
+            color: #ffffff !important;
+        }
+        .adp-step, .adp-substep {
+            color: #ffffff !important;
+            background-color: #3a3a3a !important;
+        }
+        /* Style for distance markers and text */
+        .adp-marker2 {
+            filter: invert(1);
+        }
     </style>
       
 </head>
@@ -74,7 +171,8 @@
         <p>Your location: <span id="your-location">Loading...</span></p>
         <div class="search-box">
             <input type="text" id="search-input" placeholder="Search for nearby car shops, showrooms...">
-            <button onclick="searchNearbyPlaces()">Search</button>
+            <button id="search-button" class="search-button" onclick="searchNearbyPlaces()">Search</button>
+            <div class="spinner" id="search-spinner"></div>
         </div>
         
         <div id="places-list" style="display: none; margin: 10px 0;">
@@ -83,8 +181,12 @@
 
         <div class="input-box">
             <input type="text" id="destination" placeholder="Enter destination" readonly>
-            <button onclick="getDirections()">Get Directions</button>
+            <button id="directions-button" onclick="getDirections()">Get Directions</button>
+            <div class="spinner" id="directions-spinner"></div>
         </div>
+        
+        <!-- Add the missing distance display element -->
+        <div id="distance" class="distance-info"></div>
         
         <div id="map"></div>
         <div id="directions-panel"></div>
@@ -98,6 +200,7 @@
         let userLat, userLng;
         let userLocation;
         let placesService;
+        let searchInProgress = false;
 
         function initMap() {
             // Initialize the map with default center
@@ -136,7 +239,7 @@
                             map: map,
                             title: "Your Location",
                             icon: {
-                                url: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
+                                url: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png"
                             }
                         });
 
@@ -208,56 +311,101 @@
             document.getElementById("your-location").appendChild(instructions);
         }
 
-        function searchNearbyPlaces() {
-            if (!userLocation) {
+        // Add debounce function
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func(...args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
+        }
+
+        function setSearchLoading(isLoading) {
+            const button = document.getElementById('search-button');
+            const spinner = document.getElementById('search-spinner');
+            const searchInput = document.getElementById('search-input');
+            
+            button.disabled = isLoading;
+            searchInput.disabled = isLoading;
+            spinner.style.display = isLoading ? 'inline-block' : 'none';
+            button.textContent = isLoading ? 'Searching...' : 'Search';
+        }
+
+        // Update searchNearbyPlaces function
+        async function searchNearbyPlaces() {
+            if (!userLocation || searchInProgress) {
                 alert("Please wait for your location to be detected");
                 return;
             }
 
             const searchQuery = document.getElementById('search-input').value;
+            if (!searchQuery.trim()) {
+                alert("Please enter a search term");
+                return;
+            }
+
+            searchInProgress = true;
+            setSearchLoading(true);
             
             // Clear existing markers
             markers.forEach(marker => marker.setMap(null));
             markers = [];
             
-            // First try with textSearch
-            const request = {
-                location: userLocation,
-                radius: '5000',
-                query: searchQuery + ' near me'  // Add 'near me' to improve local results
-            };
-            
-            placesService.textSearch(request, (results, status) => {
-                if (status === google.maps.places.PlacesServiceStatus.OK && results && results.length > 0) {
-                    displayResults(results);
-                } else {
-                    // If no results, try with nearbySearch
-                    const nearbyRequest = {
-                        location: userLocation,
-                        radius: '5000',
-                        keyword: searchQuery,
-                        type: ['car_repair', 'car_dealer', 'store']
-                    };
-                    
-                    placesService.nearbySearch(nearbyRequest, (nearbyResults, nearbyStatus) => {
-                        if (nearbyStatus === google.maps.places.PlacesServiceStatus.OK && nearbyResults) {
-                            displayResults(nearbyResults);
+            try {
+                // First try with textSearch
+                const request = {
+                    location: userLocation,
+                    radius: '5000',
+                    query: searchQuery + ' near me'
+                };
+                
+                await new Promise((resolve, reject) => {
+                    placesService.textSearch(request, (results, status) => {
+                        if (status === google.maps.places.PlacesServiceStatus.OK && results && results.length > 0) {
+                            displayResults(results);
+                            resolve();
                         } else {
-                            const placesList = document.getElementById('places-list');
-                            placesList.innerHTML = `
-                                <p>No results found. Try searching for terms like:</p>
-                                <ul>
-                                    <li>car workshop near me</li>
-                                    <li>auto repair shop</li>
-                                    <li>car showroom</li>
-                                    <li>[brand name] dealer</li>
-                                </ul>
-                            `;
-                            placesList.style.display = 'block';
+                            // If no results, try with nearbySearch
+                            const nearbyRequest = {
+                                location: userLocation,
+                                radius: '5000',
+                                keyword: searchQuery,
+                                type: ['car_repair', 'car_dealer', 'store']
+                            };
+                            
+                            placesService.nearbySearch(nearbyRequest, (nearbyResults, nearbyStatus) => {
+                                if (nearbyStatus === google.maps.places.PlacesServiceStatus.OK && nearbyResults) {
+                                    displayResults(nearbyResults);
+                                    resolve();
+                                } else {
+                                    const placesList = document.getElementById('places-list');
+                                    placesList.innerHTML = `
+                                        <p>No results found. Try searching for terms like:</p>
+                                        <ul>
+                                            <li>car workshop near me</li>
+                                            <li>auto repair shop</li>
+                                            <li>car showroom</li>
+                                            <li>[brand name] dealer</li>
+                                        </ul>
+                                    `;
+                                    placesList.style.display = 'block';
+                                    resolve();
+                                }
+                            });
                         }
                     });
-                }
-            });
+                });
+            } catch (error) {
+                console.error('Search error:', error);
+                alert('An error occurred while searching. Please try again.');
+            } finally {
+                searchInProgress = false;
+                setSearchLoading(false);
+            }
         }
 
         function displayResults(results) {
@@ -278,7 +426,7 @@
                             position: place.geometry.location,
                             title: place.name,
                             icon: {
-                                url: "http://maps.google.com/mapfiles/ms/icons/red-dot.png"
+                                url: "https://maps.google.com/mapfiles/ms/icons/red-dot.png"
                             }
                         });
                         markers.push(marker);
@@ -342,49 +490,73 @@
             document.getElementById('places-list').style.display = 'none';
         }
 
-        function calculateRoute() {
+        async function calculateRoute() {
             let destination = document.getElementById("destination").value;
             if (!destination) {
                 alert("Please enter the target's location!");
                 return;
             }
 
-            fetch("/get_distance", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ user_lat: userLat, user_lng: userLng, destination: destination })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.distance) {
-                    document.getElementById("distance").innerText = `Distance: ${data.distance}`;
-                } else {
-                    document.getElementById("distance").innerText = "Could not find the distance.";
-                }
-            })
-            .catch(error => console.error("Error fetching distance:", error));
+            const directionsButton = document.getElementById('directions-button');
+            const directionsSpinner = document.getElementById('directions-spinner');
+            const distanceElement = document.getElementById('distance');
+            
+            directionsButton.disabled = true;
+            directionsSpinner.style.display = 'inline-block';
+            directionsButton.textContent = 'Loading...';
 
-            let request = {
-                origin: { lat: userLat, lng: userLng },
-                destination: destination,
-                travelMode: google.maps.TravelMode.DRIVING,
-            };
-
-            directionsService.route(request, function (result, status) {
-                if (status == google.maps.DirectionsStatus.OK) {
-                    directionsRenderer.setDirections(result);
-                } else {
-                    alert("Could not retrieve route.");
+            try {
+                // Get distance
+                const response = await fetch("/get_distance", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ user_lat: userLat, user_lng: userLng, destination: destination })
+                });
+                
+                const data = await response.json();
+                if (data.distance && distanceElement) {
+                    distanceElement.innerText = `Distance: ${data.distance}`;
+                    distanceElement.style.display = 'block';
+                } else if (distanceElement) {
+                    distanceElement.innerText = "Could not find the distance.";
+                    distanceElement.style.display = 'block';
                 }
-            });
+
+                // Get directions
+                const request = {
+                    origin: { lat: userLat, lng: userLng },
+                    destination: destination,
+                    travelMode: google.maps.TravelMode.DRIVING,
+                };
+
+                const result = await new Promise((resolve, reject) => {
+                    directionsService.route(request, (result, status) => {
+                        if (status == google.maps.DirectionsStatus.OK) {
+                            resolve(result);
+                        } else {
+                            reject(new Error("Could not retrieve route."));
+                        }
+                    });
+                });
+
+                directionsRenderer.setDirections(result);
+            } catch (error) {
+                console.error('Error:', error);
+                if (distanceElement) {
+                    distanceElement.innerText = "Error: Could not calculate route.";
+                    distanceElement.style.display = 'block';
+                }
+                alert(error.message || "An error occurred while getting directions.");
+            } finally {
+                directionsButton.disabled = false;
+                directionsSpinner.style.display = 'none';
+                directionsButton.textContent = 'Get Directions';
+            }
         }
 
         function getDirections() {
             calculateRoute();
         }
-
-        // Initialize map when page loads
-        window.onload = initMap;
     </script>
 </body>
 </html>
